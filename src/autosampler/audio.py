@@ -98,100 +98,53 @@ def _parse_sounddevice_id(value: Optional[str]) -> int | str | None:
     return int(value) if str(value).isdigit() else value
 
 
-def _record_with_software_monitor(
-    *,
-    midi_out_name: str,
-    channel: int,
-    note: int,
-    velocity: int,
-    note_length: float,
-    tail: float,
-    pre_roll: float,
-    sample_rate: int,
-    channels: int,
-    input_device: int | str | None,
-    output_device: int | str | None,
-    monitor_gain: float,
-) -> np.ndarray:
+def _send_note_on(out, *, channel: int, note: int, velocity: int) -> None:
     import mido
-    import sounddevice as sd
 
-    duration = max(0.01, pre_roll + note_length + tail)
-    frames = int(round(duration * sample_rate))
-    rec = np.zeros((frames, channels), dtype=np.float32)
-    finished = threading.Event()
-    write_pos = 0
-    gain = float(monitor_gain)
+    out.send(
+        mido.Message(
+            "note_on",
+            note=int(note),
+            velocity=int(velocity),
+            channel=int(channel) - 1,
+        )
+    )
 
-    def callback(indata: np.ndarray, outdata: np.ndarray, frame_count: int, _time, status) -> None:
-        nonlocal write_pos
 
-        remaining = frames - write_pos
-        take = min(frame_count, max(0, remaining))
+def _send_note_off(out, *, channel: int, note: int) -> None:
+    import mido
 
-        outdata.fill(0.0)
+    out.send(
+        mido.Message(
+            "note_off",
+            note=int(note),
+            velocity=0,
+            channel=int(channel) - 1,
+        )
+    )
 
-        if take > 0:
-            rec[write_pos : write_pos + take, :] = indata[:take, :channels]
 
-            monitored = indata[:take, : min(indata.shape[1], outdata.shape[1])] * gain
-            outdata[:take, : monitored.shape[1]] = monitored
+def _safe_midi_panic(out, *, channel: int) -> None:
+    import mido
 
-            write_pos += take
+    midi_channel = int(channel) - 1
 
-        if write_pos >= frames:
-            finished.set()
-            raise sd.CallbackStop
+    with suppress(Exception):
+        out.send(mido.Message("control_change", control=123, value=0, channel=midi_channel))
 
-    with mido.open_output(midi_out_name) as out:
-        note_is_on = False
+    with suppress(Exception):
+        out.send(mido.Message("control_change", control=120, value=0, channel=midi_channel))
 
-        try:
-            with sd.Stream(
-                samplerate=sample_rate,
-                dtype="float32",
-                device=(input_device, output_device),
-                channels=(channels, channels),
-                callback=callback,
-            ):
-                time.sleep(pre_roll)
-
-                out.send(
-                    mido.Message(
-                        "note_on",
-                        note=note,
-                        velocity=velocity,
-                        channel=channel - 1,
-                    )
+    for midi_note in range(128):
+        with suppress(Exception):
+            out.send(
+                mido.Message(
+                    "note_off",
+                    note=midi_note,
+                    velocity=0,
+                    channel=midi_channel,
                 )
-                note_is_on = True
-
-                time.sleep(note_length)
-
-                out.send(
-                    mido.Message(
-                        "note_off",
-                        note=note,
-                        velocity=0,
-                        channel=channel - 1,
-                    )
-                )
-                note_is_on = False
-
-                time.sleep(tail)
-                finished.wait(timeout=duration + 2.0)
-
-        finally:
-            if note_is_on:
-                _safe_note_off(out, channel=channel, note=note)
-                _safe_midi_panic(out, channel=channel)
-
-            with suppress(Exception):
-                import sounddevice as sd
-
-                sd.stop()
-
-    return rec
+            )
     
 
 def record_hardware_note(
@@ -216,32 +169,18 @@ def record_hardware_note(
     duration = max(0.01, pre_roll + note_length + tail)
     frames = int(round(duration * sample_rate))
 
-
     input_device = _parse_sounddevice_id(audio_device)
     output_device = _parse_sounddevice_id(monitor_device)
 
+    # Default: monitor through the same physical interface.
     if monitor and output_device is None:
         output_device = input_device
 
-    if monitor:
-        return _record_with_software_monitor(
-            midi_out_name=midi_out_name,
-            channel=channel,
-            note=note,
-            velocity=velocity,
-            note_length=note_length,
-            tail=tail,
-            pre_roll=pre_roll,
-            sample_rate=sample_rate,
-            channels=channels,
-            input_device=input_device,
-            output_device=output_device,
-            monitor_gain=monitor_gain,
-        )
+    result: dict[str, np.ndarray] = {}
+    started = threading.Event()
+    errors: list[BaseException] = []
 
-    with mido.open_output(midi_out_name) as out:
-        note_is_on = False
-
+    def capture_plain() -> None:
         try:
             rec = sd.rec(
                 frames,
@@ -250,43 +189,112 @@ def record_hardware_note(
                 dtype="float32",
                 device=input_device,
             )
+            started.set()
+            sd.wait()
+            result["audio"] = np.asarray(rec, dtype=np.float32)
+        except BaseException as exc:
+            errors.append(exc)
+            started.set()
+
+    def capture_monitor() -> None:
+        write_pos = 0
+        rec = np.zeros((frames, channels), dtype=np.float32)
+        finished = threading.Event()
+        gain = float(monitor_gain)
+
+        def callback(indata, outdata, frame_count, _time, status) -> None:
+            nonlocal write_pos
+
+            outdata.fill(0.0)
+
+            remaining = frames - write_pos
+            take = min(frame_count, max(0, remaining))
+
+            if take > 0:
+                rec[write_pos : write_pos + take, :] = indata[:take, :channels]
+
+                monitor_channels = min(indata.shape[1], outdata.shape[1], channels)
+                outdata[:take, :monitor_channels] = (
+                    indata[:take, :monitor_channels] * gain
+                )
+
+                write_pos += take
+
+            if write_pos >= frames:
+                finished.set()
+                raise sd.CallbackStop
+
+        try:
+            with sd.Stream(
+                samplerate=sample_rate,
+                dtype="float32",
+                device=(input_device, output_device),
+                channels=(channels, channels),
+                callback=callback,
+            ):
+                started.set()
+                finished.wait(timeout=duration + 2.0)
+
+            result["audio"] = rec
+
+        except BaseException as exc:
+            errors.append(exc)
+            started.set()
+
+    capture_thread = threading.Thread(
+        target=capture_monitor if monitor else capture_plain,
+        daemon=True,
+    )
+
+    with mido.open_output(midi_out_name) as out:
+        note_is_on = False
+
+        try:
+            capture_thread.start()
+
+            if not started.wait(timeout=5.0):
+                raise RuntimeError("Audio capture did not start.")
+
+            if errors:
+                raise RuntimeError("Audio capture failed before MIDI trigger.") from errors[0]
 
             time.sleep(pre_roll)
 
-            out.send(
-                mido.Message(
-                    "note_on",
-                    note=note,
-                    velocity=velocity,
-                    channel=channel - 1,
-                )
+            _send_note_on(
+                out,
+                channel=channel,
+                note=note,
+                velocity=velocity,
             )
             note_is_on = True
 
             time.sleep(note_length)
 
-            out.send(
-                mido.Message(
-                    "note_off",
-                    note=note,
-                    velocity=0,
-                    channel=channel - 1,
-                )
-            )
+            _send_note_off(out, channel=channel, note=note)
             note_is_on = False
 
             time.sleep(tail)
-            sd.wait()
+
+            capture_thread.join(timeout=duration + 2.0)
+
+            if errors:
+                raise RuntimeError("Audio capture failed.") from errors[0]
+
+            if "audio" not in result:
+                raise RuntimeError("Audio capture finished without returning audio.")
+
+            return result["audio"]
 
         finally:
             if note_is_on:
-                _safe_note_off(out, channel=channel, note=note)
-                _safe_midi_panic(out, channel=channel)
+                with suppress(Exception):
+                    _send_note_off(out, channel=channel, note=note)
+
+                with suppress(Exception):
+                    _safe_midi_panic(out, channel=channel)
 
             with suppress(Exception):
                 sd.stop()
-
-    return np.asarray(rec, dtype=np.float32)
 
 
 def simulate_note(note: int, velocity: int, duration: float, tail: float, sample_rate: int, channels: int) -> np.ndarray:

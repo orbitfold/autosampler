@@ -10,7 +10,7 @@ import click
 
 from .audio import normalize_peak, record_hardware_note, simulate_note, trim_audio, wav_frame_count, write_wav
 from .models import BuildConfig, SampleConfig, Zone
-from .multisample import make_multisample_xml, package_multisample
+from .multisample import make_multisample_xml, make_sfz, package_multisample
 from .notes import centered_ranges, midi_to_note, note_to_midi, parse_int_list, parse_run_layers, safe_name, sampled_notes
 
 
@@ -164,6 +164,11 @@ def write_one_shot_multisample(config: SampleConfig, zones: list[Zone]) -> int:
     out_path = config.out.expanduser().resolve()
     package_multisample(workdir, out_path)
 
+    sfz_path = out_path.with_suffix(".sfz")
+    sfz_path.write_text(make_sfz(zones=zones), encoding="utf-8")
+
+    click.echo(f"Also wrote SFZ fallback: {sfz_path}")
+
     click.echo(f"\nCreated: {out_path}")
     click.echo("Drag the .multisample file onto Bitwig Sampler, or import it from Bitwig's browser.")
     if config.keep_workdir:
@@ -260,6 +265,11 @@ def build_from_runs(config: BuildConfig) -> int:
 
     out_path = config.out.expanduser().resolve()
     package_multisample(build_dir, out_path)
+
+    sfz_path = out_path.with_suffix(".sfz")
+    sfz_path.write_text(make_sfz(zones=zones), encoding="utf-8")
+
+    click.echo(f"Also wrote SFZ fallback: {sfz_path}")
 
     click.echo(f"\nCreated layered multisample: {out_path}")
     click.echo("Each recorded run is now mapped to its requested velocity range.")

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arp2600-autosampler"
+version = "0.3.0"
+description = "Auto-sample a MIDI hardware synth and export Bitwig/PreSonus .multisample packages."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "ARP 2600 AutoSampler contributors" }
+]
+keywords = ["sampler", "bitwig", "multisample", "midi", "hardware-synth", "arp-2600"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+  "click>=8.1",
+  "numpy>=1.24",
+  "soundfile>=0.12",
+  "sounddevice>=0.4",
+  "mido>=1.3",
+  "python-rtmidi>=1.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+  "pytest>=8.0",
+]
+
+[project.scripts]
+autosampler = "autosampler.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["autosampler*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

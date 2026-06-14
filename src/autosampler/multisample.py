@@ -86,12 +86,65 @@ def make_multisample_xml(
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
+def _write_bitwig_zip_entry(
+    zf: zipfile.ZipFile,
+    source: Path,
+    arcname: str,
+) -> None:
+    """
+    Write a ZIP entry in the conservative style Bitwig seems happiest with.
+
+    Important details:
+    - ZIP_STORED: no compression
+    - create_system = 0: FAT / MS-DOS, not Unix
+    - version 1.0: avoids newer ZIP metadata Bitwig may misread
+    - no extra fields
+    """
+    data = source.read_bytes()
+
+    info = zipfile.ZipInfo(
+        filename=arcname,
+        date_time=(2024, 1, 1, 0, 0, 0),
+    )
+    info.compress_type = zipfile.ZIP_STORED
+
+    # Make zipinfo show "1.0 fat", closer to Bitwig-created files.
+    info.create_system = 0
+    info.create_version = 10
+    info.extract_version = 10
+
+    # DOS archive bit. Avoid Unix permission metadata.
+    info.external_attr = 0x20
+
+    # Critical: no extended timestamp / Unix extra metadata.
+    info.extra = b""
+
+    zf.writestr(info, data)
+
+
 def package_multisample(folder: Path, output_file: Path) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
+
     if output_file.exists():
         output_file.unlink()
-    with zipfile.ZipFile(output_file, "w", compression=zipfile.ZIP_STORED) as zf:
-        zf.write(folder / "multisample.xml", "multisample.xml")
+
+    with zipfile.ZipFile(
+        output_file,
+        mode="w",
+        compression=zipfile.ZIP_STORED,
+        allowZip64=False,
+    ) as zf:
+        _write_bitwig_zip_entry(
+            zf,
+            folder / "multisample.xml",
+            "multisample.xml",
+        )
+
         samples_dir = folder / "Samples"
         for wav in sorted(samples_dir.glob("*.wav")):
-            zf.write(wav, f"Samples/{wav.name}")
+            _write_bitwig_zip_entry(
+                zf,
+                wav,
+                f"Samples/{wav.name}",
+            )
+

@@ -3,11 +3,58 @@ from __future__ import annotations
 import time
 import wave
 import threading
+from contextlib import suppress
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import soundfile as sf
+
+
+def _safe_note_off(out, *, channel: int, note: int) -> None:
+    import mido
+
+    with suppress(Exception):
+        out.send(
+            mido.Message(
+                "note_off",
+                note=int(note),
+                velocity=0,
+                channel=int(channel) - 1,
+            )
+        )
+
+
+def _safe_midi_panic(out, *, channel: int) -> None:
+    """
+    Send redundant cleanup messages on one MIDI channel.
+
+    CC 123 = all notes off
+    CC 120 = all sound off
+
+    We also send explicit note_off for all 128 notes because some MIDI/CV
+    interfaces and older synth workflows do not reliably honor panic CCs.
+    """
+    import mido
+
+    midi_channel = int(channel) - 1
+
+    with suppress(Exception):
+        out.send(mido.Message("control_change", control=123, value=0, channel=midi_channel))
+
+    with suppress(Exception):
+        out.send(mido.Message("control_change", control=120, value=0, channel=midi_channel))
+
+    for note in range(128):
+        with suppress(Exception):
+            out.send(
+                mido.Message(
+                    "note_off",
+                    note=note,
+                    velocity=0,
+                    channel=midi_channel,
+                )
+            )
 
 
 def trim_audio(data: np.ndarray, threshold_db: float, padding_ms: float, sample_rate: int) -> np.ndarray:
@@ -97,19 +144,52 @@ def _record_with_software_monitor(
             raise sd.CallbackStop
 
     with mido.open_output(midi_out_name) as out:
-        with sd.Stream(
-            samplerate=sample_rate,
-            dtype="float32",
-            device=(input_device, output_device),
-            channels=(channels, channels),
-            callback=callback,
-        ):
-            time.sleep(pre_roll)
-            out.send(mido.Message("note_on", note=note, velocity=velocity, channel=channel - 1))
-            time.sleep(note_length)
-            out.send(mido.Message("note_off", note=note, velocity=0, channel=channel - 1))
-            time.sleep(tail)
-            finished.wait(timeout=duration + 2.0)
+        note_is_on = False
+
+        try:
+            with sd.Stream(
+                samplerate=sample_rate,
+                dtype="float32",
+                device=(input_device, output_device),
+                channels=(channels, channels),
+                callback=callback,
+            ):
+                time.sleep(pre_roll)
+
+                out.send(
+                    mido.Message(
+                        "note_on",
+                        note=note,
+                        velocity=velocity,
+                        channel=channel - 1,
+                    )
+                )
+                note_is_on = True
+
+                time.sleep(note_length)
+
+                out.send(
+                    mido.Message(
+                        "note_off",
+                        note=note,
+                        velocity=0,
+                        channel=channel - 1,
+                    )
+                )
+                note_is_on = False
+
+                time.sleep(tail)
+                finished.wait(timeout=duration + 2.0)
+
+        finally:
+            if note_is_on:
+                _safe_note_off(out, channel=channel, note=note)
+                _safe_midi_panic(out, channel=channel)
+
+            with suppress(Exception):
+                import sounddevice as sd
+
+                sd.stop()
 
     return rec
     
@@ -140,6 +220,9 @@ def record_hardware_note(
     input_device = _parse_sounddevice_id(audio_device)
     output_device = _parse_sounddevice_id(monitor_device)
 
+    if monitor and output_device is None:
+        output_device = input_device
+
     if monitor:
         return _record_with_software_monitor(
             midi_out_name=midi_out_name,
@@ -157,13 +240,52 @@ def record_hardware_note(
         )
 
     with mido.open_output(midi_out_name) as out:
-        rec = sd.rec(frames, samplerate=sample_rate, channels=channels, dtype="float32", device=input_device)
-        time.sleep(pre_roll)
-        out.send(mido.Message("note_on", note=note, velocity=velocity, channel=channel - 1))
-        time.sleep(note_length)
-        out.send(mido.Message("note_off", note=note, velocity=0, channel=channel - 1))
-        time.sleep(tail)
-        sd.wait()
+        note_is_on = False
+
+        try:
+            rec = sd.rec(
+                frames,
+                samplerate=sample_rate,
+                channels=channels,
+                dtype="float32",
+                device=input_device,
+            )
+
+            time.sleep(pre_roll)
+
+            out.send(
+                mido.Message(
+                    "note_on",
+                    note=note,
+                    velocity=velocity,
+                    channel=channel - 1,
+                )
+            )
+            note_is_on = True
+
+            time.sleep(note_length)
+
+            out.send(
+                mido.Message(
+                    "note_off",
+                    note=note,
+                    velocity=0,
+                    channel=channel - 1,
+                )
+            )
+            note_is_on = False
+
+            time.sleep(tail)
+            sd.wait()
+
+        finally:
+            if note_is_on:
+                _safe_note_off(out, channel=channel, note=note)
+                _safe_midi_panic(out, channel=channel)
+
+            with suppress(Exception):
+                sd.stop()
+
     return np.asarray(rec, dtype=np.float32)
 
 

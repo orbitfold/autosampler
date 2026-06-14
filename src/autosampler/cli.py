@@ -18,6 +18,19 @@ def sampling_options(func: F) -> F:
     options = [
         click.option("--midi-out", help="MIDI output port name connected to the synth."),
         click.option("--audio-device", help="Audio input device index/name. Omit for default input."),
+        click.option("--monitor",
+                     is_flag=True,
+                     help="Pass the audio input through an output device while sampling.",
+        ),
+        click.option("--monitor-device",
+                     help="Audio output device index/name for software monitoring. Omit for default output.",
+        ),
+        click.option("--monitor-gain",
+                     default=1.0,
+                     show_default=True,
+                     type=float,
+                     help="Software monitor gain multiplier. Does not affect saved WAVs."
+        ),
         click.option("--midi-channel", default=1, show_default=True, type=click.IntRange(1, 16), help="MIDI channel."),
         click.option("--start", default="C1", show_default=True, help="Lowest key to cover, e.g. C1 or 36. Bitwig convention: C3 == 60."),
         click.option("--end", default="C5", show_default=True, help="Highest key to cover, e.g. C5 or 84."),
@@ -63,6 +76,7 @@ def make_sample_config(**kwargs: object) -> SampleConfig:
     kwargs.setdefault("out", Path("unused.multisample"))
     kwargs["normalize_dbfs"] = normalize_dbfs
     kwargs["channels"] = int(kwargs["channels"])
+    kwargs["monitor_gain"] = float(kwargs["monitor_gain"])
     return SampleConfig(**kwargs)  # type: ignore[arg-type]
 
 

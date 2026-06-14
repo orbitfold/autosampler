@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import wave
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +45,75 @@ def wav_frame_count(path: Path) -> int:
         return int(wav_file.getnframes())
 
 
+def _parse_sounddevice_id(value: Optional[str]) -> int | str | None:
+    if value is None or value == "":
+        return None
+    return int(value) if str(value).isdigit() else value
+
+
+def _record_with_software_monitor(
+    *,
+    midi_out_name: str,
+    channel: int,
+    note: int,
+    velocity: int,
+    note_length: float,
+    tail: float,
+    pre_roll: float,
+    sample_rate: int,
+    channels: int,
+    input_device: int | str | None,
+    output_device: int | str | None,
+    monitor_gain: float,
+) -> np.ndarray:
+    import mido
+    import sounddevice as sd
+
+    duration = max(0.01, pre_roll + note_length + tail)
+    frames = int(round(duration * sample_rate))
+    rec = np.zeros((frames, channels), dtype=np.float32)
+    finished = threading.Event()
+    write_pos = 0
+    gain = float(monitor_gain)
+
+    def callback(indata: np.ndarray, outdata: np.ndarray, frame_count: int, _time, status) -> None:
+        nonlocal write_pos
+
+        remaining = frames - write_pos
+        take = min(frame_count, max(0, remaining))
+
+        outdata.fill(0.0)
+
+        if take > 0:
+            rec[write_pos : write_pos + take, :] = indata[:take, :channels]
+
+            monitored = indata[:take, : min(indata.shape[1], outdata.shape[1])] * gain
+            outdata[:take, : monitored.shape[1]] = monitored
+
+            write_pos += take
+
+        if write_pos >= frames:
+            finished.set()
+            raise sd.CallbackStop
+
+    with mido.open_output(midi_out_name) as out:
+        with sd.Stream(
+            samplerate=sample_rate,
+            dtype="float32",
+            device=(input_device, output_device),
+            channels=(channels, channels),
+            callback=callback,
+        ):
+            time.sleep(pre_roll)
+            out.send(mido.Message("note_on", note=note, velocity=velocity, channel=channel - 1))
+            time.sleep(note_length)
+            out.send(mido.Message("note_off", note=note, velocity=0, channel=channel - 1))
+            time.sleep(tail)
+            finished.wait(timeout=duration + 2.0)
+
+    return rec
+    
+
 def record_hardware_note(
     *,
     midi_out_name: str,
@@ -56,6 +126,9 @@ def record_hardware_note(
     sample_rate: int,
     channels: int,
     audio_device: Optional[str],
+    monitor: bool = False,
+    monitor_device: Optional[str] = None,
+    monitor_gain: float = 1.0,
 ) -> np.ndarray:
     import mido
     import sounddevice as sd
@@ -63,12 +136,28 @@ def record_hardware_note(
     duration = max(0.01, pre_roll + note_length + tail)
     frames = int(round(duration * sample_rate))
 
-    device: int | str | None = None
-    if audio_device is not None:
-        device = int(audio_device) if str(audio_device).isdigit() else audio_device
+
+    input_device = _parse_sounddevice_id(audio_device)
+    output_device = _parse_sounddevice_id(monitor_device)
+
+    if monitor:
+        return _record_with_software_monitor(
+            midi_out_name=midi_out_name,
+            channel=channel,
+            note=note,
+            velocity=velocity,
+            note_length=note_length,
+            tail=tail,
+            pre_roll=pre_roll,
+            sample_rate=sample_rate,
+            channels=channels,
+            input_device=input_device,
+            output_device=output_device,
+            monitor_gain=monitor_gain,
+        )
 
     with mido.open_output(midi_out_name) as out:
-        rec = sd.rec(frames, samplerate=sample_rate, channels=channels, dtype="float32", device=device)
+        rec = sd.rec(frames, samplerate=sample_rate, channels=channels, dtype="float32", device=input_device)
         time.sleep(pre_roll)
         out.send(mido.Message("note_on", note=note, velocity=velocity, channel=channel - 1))
         time.sleep(note_length)

@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "arp2600-autosampler"
+name = "autosampler"
 version = "0.3.0"
 description = "Auto-sample a MIDI hardware synth and export Bitwig/PreSonus .multisample packages."
 readme = "README.md"
@@ -38,12 +38,3 @@ dev = [
   "build>=1.2",
   "pytest>=8.0",
 ]
-
-[project.scripts]
-autosampler = "autosampler.cli:cli"
-
-[tool.setuptools.packages.find]
-include = ["autosampler*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

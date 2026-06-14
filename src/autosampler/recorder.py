@@ -93,6 +93,9 @@ def record_samples(config: SampleConfig, *, run_name: str | None = None) -> tupl
                             sample_rate=config.sample_rate,
                             channels=config.channels,
                             audio_device=config.audio_device,
+                            monitor=config.monitor,
+                            monitor_device=config.monitor_device,
+                            monitor_gain=config.monitor_gain,
                         )
 
                     data = trim_audio(data, config.trim_threshold_db, config.trim_padding_ms, config.sample_rate)

@@ -23,6 +23,9 @@ class Zone:
 class SampleConfig:
     midi_out: Optional[str]
     audio_device: Optional[str]
+    monitor: bool
+    monitor_device: Optional[str]
+    monitor_gain: float
     midi_channel: int
     start: str
     end: str
